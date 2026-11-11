@@ -8,10 +8,11 @@
 <meta name="apple-mobile-web-app-title" content="Cedolini">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="theme-color" content="#0b6e4f">
+<link rel="apple-touch-icon" href="icon.png">
 <title>Cedolini</title>
 <style>
-:root{--bg:#f3f4f6;--card:#fff;--text:#111827;--muted:#6b7280;--accent:#0b6e4f;--line:#e5e7eb;color-scheme:light dark}
-@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#1b1e25;--text:#f3f4f6;--muted:#9ca3af;--accent:#34d399;--line:#2b2f38}}
+:root{--bg:#f3f4f6;--card:#fff;--text:#111827;--muted:#6b7280;--accent:#0b6e4f;--line:#e5e7eb;--neg:#b91c1c;color-scheme:light dark}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--card:#1b1e25;--text:#f3f4f6;--muted:#9ca3af;--accent:#34d399;--line:#2b2f38;--neg:#f87171}}
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,system-ui,"Segoe UI",sans-serif}
 body{padding:calc(env(safe-area-inset-top,0px) + 14px) 14px calc(env(safe-area-inset-bottom,0px) + 24px);max-width:560px;margin:0 auto}
@@ -30,6 +31,14 @@ button.sec{background:transparent;color:var(--accent);border:1px solid var(--lin
 .item{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid var(--line)}
 .item button{width:auto;padding:4px 10px;font-size:14px;background:transparent;color:#dc2626;border:1px solid var(--line)}
 #msg{white-space:pre-line;margin-top:10px}
+.tbl{width:100%;border-collapse:collapse;font-size:15px}
+.tbl th{font-weight:600;color:var(--muted);font-size:12px;text-align:right;padding:2px 0 6px}
+.tbl td{padding:8px 0;border-top:1px solid var(--line);text-align:right}
+.tbl th:first-child,.tbl td:first-child{text-align:left}
+.neg{color:var(--neg)}
+.bar{fill:var(--accent)}.bar.dim{opacity:.4}.bar0{fill:var(--line)}
+.val{font-size:10px;fill:var(--muted)}.mon{font-size:11px;fill:var(--muted)}.mon.selm{fill:var(--text);font-weight:700}
+.axis{stroke:var(--line);stroke-width:1}.bg{cursor:pointer}
 </style>
 </head>
 <body>
@@ -53,35 +62,64 @@ button.sec{background:transparent;color:var(--accent);border:1px solid var(--lin
 
 <div class="card"><h2>Risposta</h2><div id="result"></div></div>
 
+<div class="card"><h2>Ferie e permessi</h2><div id="ferie"></div></div>
+
+<div class="card"><h2>Netto mese per mese</h2><div id="chart"></div></div>
+
+<div class="card">
+  <h2>Impostazioni</h2>
+  <label class="muted" for="div">Divisore orario (paga oraria = elementi retributivi mensili ÷ divisore)</label>
+  <input id="div" type="number" step="0.01" min="100" max="250" inputmode="decimal" style="margin-top:6px">
+</div>
+
 <div class="card">
   <h2>Cedolini caricati (<span id="count">0</span>)</h2>
   <div id="list"></div>
   <div class="row" style="margin-top:12px">
-    <button class="sec" id="exp">Esporta backup</button>
-    <button class="sec" id="imp">Ripristina</button>
+    <button class="sec" id="exp">Salva backup (file)</button>
+    <button class="sec" id="imp">Ripristina da file</button>
   </div>
+  <input id="impfile" type="file" accept=".json,application/json,text/plain" hidden>
+  <button class="sec" id="impt" style="margin-top:8px;font-size:14px;padding:8px">Ripristina da testo incollato</button>
 </div>
+<div class="muted" style="text-align:center">v4</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
 "use strict";
-const MONTHS=["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"];
-const KEY="cedolini.v1";
-const eur=new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR"});
-const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
 const $=id=>document.getElementById(id);
+const cap=s=>s.charAt(0).toUpperCase()+s.slice(1);
 
-// ---------- storage ----------
-function load(){try{return JSON.parse(localStorage.getItem(KEY))||[]}catch(e){return[]}}
-function save(){try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){alert("Impossibile salvare i dati su questo dispositivo.")}}
-let data=load();
-try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
-
-// ---------- lettura PDF ----------
-pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+// ==== PURE:START (logica senza DOM, testabile)
+const MONTHS=["gennaio","febbraio","marzo","aprile","maggio","giugno","luglio","agosto","settembre","ottobre","novembre","dicembre"];
 const AMT=/^\d+(?:\.\d{3})*,\d{2}$/;
+const AMT5=/^\d+(?:\.\d{3})*,\d{5}$/;
+const AMT4=/^\d+,\d{4}$/;
 const toNum=s=>parseFloat(s.replace(/\./g,"").replace(",","."));
+const r2=x=>Math.round(x*100)/100;
+const NUM=/^-?\d+(?:\.\d{3})*,\d{1,4}$/; // anche "157,2" (una sola cifra decimale)
+// campi opzionali: se mancano in un cedolino già salvato, il reimport del PDF li completa
+const ENRICH=["ore","oreRetr","elementi","docId","quadra","strOre","strEur","maggOre","maggEur","ferie","rol","exfest"];
 
+function toWords(items){
+  const words=[];let text="";
+  for(const it of items){
+    if(!it.str||!it.str.trim())continue;
+    text+=it.str+" ";
+    const len=it.str.length,re=/\S+/g,x=it.transform[4];let m;
+    while((m=re.exec(it.str))){
+      // separa numero e testo incollati, es. "1445,65000Contingenza"
+      const g=m[0].match(/^(\d+(?:\.\d{3})*,\d+)([A-Za-zÀ-ÿ].*)$/);
+      let off=m.index;
+      for(const t of (g?[g[1],g[2]]:[m[0]])){
+        words.push({t,x0:x+it.width*off/len,x1:x+it.width*(off+t.length)/len,y:it.transform[5],h:it.height||8});
+        off+=t.length;
+      }
+    }
+  }
+  words.sort((a,b)=>{const la=Math.round(a.y/3),lb=Math.round(b.y/3);return la!==lb?lb-la:a.x0-b.x0});
+  return{words,text};
+}
 function findLabel(words,label){
   const t=label.toLowerCase().split(" ");
   for(let i=0;i+t.length<=words.length;i++){
@@ -91,53 +129,97 @@ function findLabel(words,label){
   }
   return null;
 }
-// importo più vicino sotto l'etichetta (y cresce verso l'alto nei PDF)
-function below(L,A){
-  const c=A.filter(a=>{const top=a.y+a.h*0.8;return top<=L.y+2&&L.y-top<30&&a.x1>L.x0-5&&a.x0<L.x1+90});
-  if(!c.length)return null;
-  return c.reduce((m,a)=>(a.y+a.h>m.y+m.h?a:m)).v;
+function findLabels(words,label){
+  const t=label.toLowerCase().split(" "),res=[];
+  for(let i=0;i+t.length<=words.length;i++){
+    let ok=true;
+    for(let k=0;k<t.length;k++){if(words[i+k].t.toLowerCase()!==t[k]){ok=false;break}}
+    if(ok){const w=words.slice(i,i+t.length);res.push({x0:Math.min(...w.map(x=>x.x0)),x1:Math.max(...w.map(x=>x.x1)),y:w[0].y})}
+  }
+  return res;
 }
-// importo più vicino a destra, sulla stessa riga
-function rightOf(L,A){
-  const c=A.filter(a=>a.x0>=L.x1-2&&Math.abs(a.y-L.y)<15);
+// importo sotto l'etichetta: il più vicino in verticale, a parità il più allineato (nei PDF la y cresce verso l'alto)
+function below(L,A,maxDy=30,extraRight=90){
+  const c=A.filter(a=>a.y<=L.y+2&&L.y-a.y<maxDy&&a.x1>L.x0-5&&a.x0<L.x1+extraRight);
   if(!c.length)return null;
-  return c.reduce((m,a)=>(a.x0<m.x0?a:m)).v;
+  const mid=(L.x0+L.x1)/2;
+  c.sort((a,b)=>Math.round((L.y-a.y)*2)-Math.round((L.y-b.y)*2)||Math.abs((a.x0+a.x1)/2-mid)-Math.abs((b.x0+b.x1)/2-mid));
+  return c[0].v;
+}
+// importo a destra sulla stessa riga: prima la riga più vicina, poi il più vicino in orizzontale
+function rightOf(L,A,tol=4){
+  const c=A.filter(a=>a.x0>=L.x1-2&&Math.abs(a.y-L.y)<=tol);
+  if(!c.length)return null;
+  c.sort((a,b)=>Math.round(Math.abs(a.y-L.y))-Math.round(Math.abs(b.y-L.y))||a.x0-b.x0);
+  return c[0].v;
 }
 
-async function parsePdf(file){
-  const buf=await file.arrayBuffer();
-  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
-  let full="",lordo=null,rit=null,netto=null;
-  for(let p=1;p<=pdf.numPages;p++){
-    const page=await pdf.getPage(p);
-    const tc=await page.getTextContent();
-    const words=[];
-    for(const it of tc.items){
-      if(!it.str||!it.str.trim())continue;
-      full+=it.str+" ";
-      const len=it.str.length,re=/\S+/g;let m;
-      while((m=re.exec(it.str))){
-        const x=it.transform[4];
-        words.push({t:m[0],x0:x+it.width*m.index/len,x1:x+it.width*(m.index+m[0].length)/len,y:it.transform[5],h:it.height||8});
-      }
+// somma ore e importi delle righe "Ore <key>" (es. "Ore str. 45%", "Ore magg. 30%"): ore nella colonna Ore/Giorni, importo in Competenze (a destra)
+function extractVoci(words,A2,A4,key){
+  let ore=0,eur=0;
+  for(const L of findLabels(words,"Ore "+key)){
+    const h=rightOf(L,A4,3);if(h===null)continue;
+    const imp=A2.filter(a=>Math.abs(a.y-L.y)<=3&&a.x0>=480).sort((a,b)=>b.x1-a.x1)[0];
+    ore+=h;eur+=imp?imp.v:0;
+  }
+  return{ore:r2(ore),eur:r2(eur)};
+}
+// tabella "FERIE E PERMESSI" (ore): [residuo a.p., teorico annuo, goduti, residuo teorico, residuo maturato]
+function extractFerie(words){
+  const cols=["RESIDUO A.P","TEORICO ANNUO","GODUTI ANNUO","RESIDUI TEORICI","RES. MATURATO"].map(l=>findLabel(words,l));
+  if(cols.some(c=>!c))return null;
+  const hy=cols[0].y;
+  const nums=words.filter(w=>NUM.test(w.t)&&w.x0<390).map(w=>({...w,v:toNum(w.t)}));
+  const row=pred=>{
+    const L=words.find(w=>pred(w.t)&&w.x0<60&&w.y<hy-2);
+    if(!L)return null;
+    const out=[null,null,null,null,null];let n=0;
+    for(const a of nums.filter(a=>Math.abs(a.y-L.y)<=2.5&&a.x0>L.x1)){
+      let bi=0;cols.forEach((c,i)=>{if(Math.abs(a.x0-c.x0)<Math.abs(a.x0-cols[bi].x0))bi=i});
+      if(out[bi]===null){out[bi]=a.v;n++}
     }
-    full+="\n";
-    words.sort((a,b)=>{const la=Math.round(a.y/3),lb=Math.round(b.y/3);return la!==lb?lb-la:a.x0-b.x0});
+    return n>=3?out:null;
+  };
+  return{ferie:row(t=>t==="FERIE"),rol:row(t=>t==="ROL"),exfest:row(t=>/^FESTIVITA/i.test(t))};
+}
+
+// pages: array (una voce per pagina) di liste di item testuali di pdf.js
+function analyze(pages){
+  let full="",lordo=null,rit=null,netto=null,ore=null,oreRetr=null,elem=null,docId=null;
+  let strOre=0,strEur=0,maggOre=0,maggEur=0,fer=null;
+  pages.forEach((items,pi)=>{
+    const{words,text}=toWords(items);
+    full+=text+"\n";
     const A=words.filter(w=>AMT.test(w.t)).map(w=>({...w,v:toNum(w.t)}));
+    const a4=words.filter(w=>AMT4.test(w.t)).map(w=>({...w,v:toNum(w.t)}));
+    const st=extractVoci(words,A,a4,"str."),mg=extractVoci(words,A,a4,"magg.");
+    strOre+=st.ore;strEur+=st.eur;maggOre+=mg.ore;maggEur+=mg.eur;
+    if(!fer){const f=extractFerie(words);if(f&&(f.ferie||f.rol||f.exfest))fer=f}
     let L;
     if(lordo===null&&(L=findLabel(words,"Totale Competenze")))lordo=below(L,A);
     if(rit===null&&(L=findLabel(words,"Totale Ritenute")))rit=below(L,A);
-    if(netto===null&&(L=findLabel(words,"pagare")))netto=rightOf(L,A);
-  }
-  let m=full.match(/Periodo di competenza\s*:\s*(\d{1,2})\s+(\d{4})/i)||full.match(/\b(0[1-9]|1[0-2])\s+(20\d{2})\b/);
+    if(netto===null&&(L=findLabel(words,"pagare")))netto=rightOf(L,A,15);
+    if(ore===null&&(L=findLabel(words,"Ore Lav.")))ore=below(L,A,20);
+    // ore retribuite = ore lavorate + ferie: riga "129 HH lavorate pr.prod.var."
+    if(oreRetr===null&&(L=findLabel(words,"pr.prod.var.")))oreRetr=rightOf(L,words.filter(w=>AMT4.test(w.t)).map(w=>({...w,v:toNum(w.t)})));
+    // totale elementi retributivi: numero con 5 decimali nella zona sopra l'intestazione "Voce"
+    const V=findLabel(words,"Voce");
+    for(const w of words){
+      if(!AMT5.test(w.t))continue;
+      if(V&&w.y<=V.y)continue;
+      const v=toNum(w.t);
+      if(v>100&&(elem===null||v>elem))elem=v;
+    }
+    if(pi===0&&docId===null){const w=words.find(w=>/^\d{7}$/.test(w.t));if(w)docId=w.t}
+  });
   if(!full.trim())throw new Error("PDF senza testo (forse una scansione).");
+  const m=full.match(/Periodo di competenza\s*:\s*(\d{1,2})\s+(\d{4})/i)||full.match(/\b(0[1-9]|1[0-2])\s+(20\d{2})\b/);
   if(!m)throw new Error("Mese/anno di competenza non trovati.");
   if(lordo===null||rit===null)throw new Error("Totali (competenze, ritenute) non trovati.");
-  if(netto===null)netto=Math.round((lordo-rit)*100)/100;
-  return{month:+m[1],year:+m[2],lordo,ritenute:rit,netto,fileName:file.name};
+  if(netto===null)netto=r2(lordo-rit);
+  return{month:+m[1],year:+m[2],lordo,ritenute:rit,netto,ore,oreRetr:oreRetr>0?oreRetr:null,elementi:elem,docId,strOre:r2(strOre),strEur:r2(strEur),maggOre:r2(maggOre),maggEur:r2(maggEur),ferie:fer?fer.ferie:null,rol:fer?fer.rol:null,exfest:fer?fer.exfest:null,quadra:Math.abs(netto-(lordo-rit))<=0.5};
 }
 
-// ---------- domande ----------
 function parseQuery(text){
   const lower=text.toLowerCase();let month=null;
   for(const w of lower.split(/[^a-zàèéìòù]+/)){
@@ -149,85 +231,265 @@ function parseQuery(text){
   return{month,year:y?+y[0]:null};
 }
 
+function summarize(data,year,month,divisor){
+  const rows=data.filter(d=>d.year===year&&(month===0||d.month===month));
+  const s=k=>r2(rows.reduce((a,d)=>a+(d[k]||0),0));
+  const hs=rows.filter(d=>d.elementi&&divisor>0).map(d=>r2(d.elementi/divisor));
+  const withOre=rows.filter(d=>typeof d.ore==="number");
+  const hr=rows.filter(d=>typeof d.oreRetr==="number"&&d.oreRetr>0);
+  const oreRetr=hr.length?r2(hr.reduce((a,d)=>a+d.oreRetr,0)):null;
+  const have=new Set(rows.map(d=>d.month));
+  const sx=k=>{const a=rows.filter(d=>typeof d[k]==="number");return a.length?r2(a.reduce((t,d)=>t+d[k],0)):null};
+  const snap=rows.filter(d=>d.ferie||d.rol||d.exfest).sort((a,b)=>b.month-a.month)[0]||null;
+  return{
+    strOre:sx("strOre"),strEur:sx("strEur"),maggOre:sx("maggOre"),maggEur:sx("maggEur"),
+    strComplete:rows.every(d=>typeof d.strOre==="number"),
+    snap:snap?{month:snap.month,year:snap.year,ferie:snap.ferie||null,rol:snap.rol||null,exfest:snap.exfest||null}:null,
+    oreRetr,oreRetrComplete:hr.length===rows.length,
+    lordoH:oreRetr?r2(hr.reduce((a,d)=>a+d.lordo,0)/oreRetr):null,
+    nettoH:oreRetr?r2(hr.reduce((a,d)=>a+d.netto,0)/oreRetr):null,
+    rows,lordo:s("lordo"),ritenute:s("ritenute"),netto:s("netto"),
+    ore:withOre.length?r2(withOre.reduce((a,d)=>a+d.ore,0)):null,
+    oreComplete:withOre.length===rows.length,
+    hMin:hs.length?Math.min(...hs):null,hMax:hs.length?Math.max(...hs):null,
+    missingData:rows.some(d=>!d.elementi||typeof d.ore!=="number"||!d.oreRetr||typeof d.strOre!=="number"||!(d.ferie||d.rol)),
+    badTotals:rows.filter(d=>d.quadra===false),
+    missing:MONTHS.map((n,i)=>i+1).filter(m=>!have.has(m))
+  };
+}
+// totali mensili di un campo per l'anno (12 valori, null se il mese non c'è)
+function monthly(data,year,key="netto"){
+  const a=Array(12).fill(null);
+  for(const d of data)if(d.year===year)a[d.month-1]=(a[d.month-1]||0)+d[key];
+  return a.map(v=>v===null?null:r2(v));
+}
+// scarta i record non validi (storage corrotto o backup sbagliato) per non bloccare l'app
+function num(v){return typeof v==="number"&&isFinite(v)?v:null}
+function clean(p){
+  if(!p||typeof p!=="object")return null;
+  const month=Math.trunc(p.month),year=Math.trunc(p.year);
+  if(!(month>=1&&month<=12)||!(year>=1990&&year<=2100))return null;
+  const lordo=num(p.lordo),ritenute=num(p.ritenute),netto=num(p.netto);
+  if(lordo===null||ritenute===null||netto===null)return null;
+  const o={month,year,lordo,ritenute,netto,fileName:typeof p.fileName==="string"?p.fileName.slice(0,120):""};
+  for(const k of ["ore","oreRetr","elementi"]){const v=num(p[k]);if(v!==null&&v>0)o[k]=v}
+  if(typeof p.docId==="string"&&/^\d{1,12}$/.test(p.docId))o.docId=p.docId;
+  if(typeof p.quadra==="boolean")o.quadra=p.quadra;
+  for(const k of ["strOre","strEur","maggOre","maggEur"]){const v=num(p[k]);if(v!==null&&v>=0)o[k]=v}
+  for(const k of ["ferie","rol","exfest"]){
+    if(Array.isArray(p[k])&&p[k].length===5&&p[k].every(v=>v===null||num(v)!==null))o[k]=p[k].slice();
+  }
+  return o;
+}
+// ==== PURE:END
+
+// ---------- storage ----------
+const KEY="cedolini.v1",DKEY="cedolini.divisor";
+const eur=new Intl.NumberFormat("it-IT",{style:"currency",currency:"EUR",useGrouping:"always"});
+const nf2=new Intl.NumberFormat("it-IT",{minimumFractionDigits:2,maximumFractionDigits:2,useGrouping:"always"});
+function load(){try{const a=JSON.parse(localStorage.getItem(KEY));return Array.isArray(a)?a.map(clean).filter(Boolean):[]}catch(e){return[]}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(data))}catch(e){alert("Impossibile salvare i dati su questo dispositivo.")}}
+let data=load();
+let divisor=173;
+try{const d=parseFloat(localStorage.getItem(DKEY));if(d>=100&&d<=250)divisor=d}catch(e){}
+try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
+
+// ---------- lettura PDF ----------
+if(window.pdfjsLib)pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+async function parsePdf(file){
+  if(!window.pdfjsLib)throw new Error("Libreria PDF non caricata: serve internet la prima volta.");
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+  const pages=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const tc=await page.getTextContent();
+    pages.push(tc.items);
+  }
+  const r=analyze(pages);
+  r.fileName=file.name;
+  return r;
+}
+
 // ---------- UI ----------
 function years(){const ys=[...new Set(data.map(d=>d.year))].sort((a,b)=>b-a);return ys.length?ys:[new Date().getFullYear()]}
+let _lastYears="",_lastList="";
 function fillSelects(){
   const mS=$("month"),yS=$("year"),cm=mS.value,cy=yS.value;
-  mS.innerHTML='<option value="0">Tutto l\'anno</option>'+MONTHS.map((n,i)=>`<option value="${i+1}">${cap(n)}</option>`).join("");
-  yS.innerHTML=years().map(y=>`<option>${y}</option>`).join("");
+  if(!mS.options.length)mS.innerHTML='<option value="0">Tutto l\'anno</option>'+MONTHS.map((n,i)=>`<option value="${i+1}">${cap(n)}</option>`).join("");
+  const yh=years().map(y=>`<option>${y}</option>`).join("");
+  if(yh!==_lastYears){yS.innerHTML=yh;_lastYears=yh}
   if(cm)mS.value=cm;
   if(cy&&years().includes(+cy))yS.value=cy;
+}
+const initials="GFMAMGLASOND";
+const kfmt=v=>(v/1000).toFixed(1).replace(".",",")+"k";
+function cell(v){return v===null||v===undefined?"–":`<span class="${v<0?"neg":""}">${nf2.format(v)}</span>`}
+function renderFerie(S){
+  const el=$("ferie");
+  if(!S.rows.length){el.innerHTML='<div class="muted">Nessun cedolino in questo periodo.</div>';return}
+  if(!S.snap){el.innerHTML='<div class="muted">Per vedere ferie e permessi ricarica i PDF: i cedolini già presenti vengono aggiornati, non duplicati.</div>';return}
+  const row=(n,a)=>a?`<tr><td>${n}</td><td>${cell(a[4])}</td><td>${cell(a[3])}</td><td>${cell(a[2])}</td></tr>`:"";
+  el.innerHTML=`<div class="muted" style="margin-bottom:8px">Stato a ${cap(MONTHS[S.snap.month-1])} ${S.snap.year} (in ore)</div>
+    <table class="tbl"><tr><th></th><th>Residuo oggi</th><th>A fine anno</th><th>Goduti</th></tr>
+    ${row("Ferie",S.snap.ferie)}${row("ROL",S.snap.rol)}${row("Ex festività",S.snap.exfest)}</table>
+    <div class="muted" style="margin-top:8px">Residuo oggi = maturato − goduti: se è negativo hai usato più ore di quelle maturate finora. A fine anno = residuo teorico se maturi tutto l'anno.</div>`;
+}
+function renderChart(year,month){
+  const el=$("chart"),vals=monthly(data,year),max=Math.max(...vals.map(v=>v||0));
+  if(!max){el.innerHTML=`<div class="muted">Nessun dato per ${year}.</div>`;return}
+  const W=360,H=170,base=140,top=24,slot=W/12,bw=20;
+  let svg=`<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Netto mese per mese, ${year}" style="width:100%;height:auto;display:block"><line x1="0" y1="${base}" x2="${W}" y2="${base}" class="axis"/>`;
+  vals.forEach((v,i)=>{
+    const cx=i*slot+slot/2,m=i+1;
+    if(v===null)svg+=`<rect x="${cx-bw/2}" y="${base-2}" width="${bw}" height="2" class="bar0"/>`;
+    else{
+      const h=Math.max(2,v/max*(base-top)),y=base-h;
+      svg+=`<g data-m="${m}" class="bg"><rect x="${cx-slot/2}" y="0" width="${slot}" height="${H}" fill="transparent"/><rect x="${cx-bw/2}" y="${y}" width="${bw}" height="${h}" rx="3" class="bar${month&&month!==m?" dim":""}"/><text x="${cx}" y="${y-4}" text-anchor="middle" class="val">${kfmt(v)}</text></g>`;
+    }
+    svg+=`<text x="${cx}" y="${base+16}" text-anchor="middle" class="mon${month===m?" selm":""}">${initials[i]}</text>`;
+  });
+  svg+="</svg>";
+  const have=vals.filter(v=>v!==null),tot=r2(have.reduce((a,v)=>a+v,0));
+  el.innerHTML=svg+`<div class="muted" style="margin-top:6px">Netto ${year}: ${eur.format(tot)} · media ${eur.format(r2(tot/have.length))} al mese (${have.length} ${have.length===1?"mese":"mesi"}). Tocca una barra per vedere il mese.</div>`;
 }
 function render(){
   fillSelects();
   const month=+$("month").value,year=+$("year").value;
-  const rows=data.filter(d=>d.year===year&&(month===0||d.month===month));
+  const S=summarize(data,year,month,divisor);
   const r=$("result");
-  if(!rows.length){r.innerHTML=`<div class="muted">Nessun cedolino per ${month?cap(MONTHS[month-1])+" ":""}${year}.</div>`}
+  if(!S.rows.length){r.innerHTML=`<div class="muted">Nessun cedolino per ${month?cap(MONTHS[month-1])+" ":""}${year}.</div>`}
   else{
-    const s=k=>Math.round(rows.reduce((a,d)=>a+d[k],0)*100)/100;
     let h=`<div class="res-title">${month?cap(MONTHS[month-1])+" "+year:"Anno "+year}</div>
-      <div class="kv"><span>Lordo</span><span>${eur.format(s("lordo"))}</span></div>
-      <div class="kv"><span>Trattenute</span><span>${eur.format(s("ritenute"))}</span></div>
-      <div class="kv big"><span>Netto</span><span>${eur.format(s("netto"))}</span></div>`;
-    if(!month){
-      const have=new Set(rows.map(d=>d.month));
-      const miss=MONTHS.map((n,i)=>i+1).filter(m=>!have.has(m)).map(m=>cap(MONTHS[m-1]));
-      h+=`<div class="muted" style="margin-top:8px">${miss.length?`Basato su ${have.size} mesi. Mancano: ${miss.join(", ")}.`:"Tutti i 12 mesi presenti."}</div>`;
+      <div class="kv"><span>Lordo</span><span>${eur.format(S.lordo)}</span></div>
+      <div class="kv"><span>Trattenute</span><span>${eur.format(S.ritenute)}</span></div>
+      <div class="kv big"><span>Netto</span><span>${eur.format(S.netto)}</span></div>`;
+    if(S.hMin!==null){
+      const t=S.hMin===S.hMax?eur.format(S.hMin)+"/h":`da ${eur.format(S.hMin)} a ${eur.format(S.hMax)}/h`;
+      h+=`<div class="kv"><span>Paga oraria base (lorda)</span><span>${t}</span></div>`;
     }
+    if(S.ore!==null){
+      h+=`<div class="kv"><span>Ore lavorate${S.oreComplete?"":" (parziale)"}</span><span>${nf2.format(S.ore)} h</span></div>`;
+    }
+    if(S.oreRetr!==null){
+      h+=`<div class="kv"><span>Ore retribuite${S.oreRetrComplete?"":" (parziale)"}</span><span>${nf2.format(S.oreRetr)} h</span></div>
+      <div class="kv"><span>Lordo per ora retribuita</span><span>${eur.format(S.lordoH)}/h</span></div>
+      <div class="kv"><span>Netto per ora retribuita</span><span>${eur.format(S.nettoH)}/h</span></div>
+      <div class="muted" style="margin-top:6px">Ore retribuite = ore lavorate + ferie. Lordo e netto orari sono una media: mensilità aggiuntive, rimborsi e straordinari li alzano.</div>`;
+    }
+    if(S.strOre!==null){
+      h+=`<div class="kv"><span>Ore di straordinario${S.strComplete?"":" (parziale)"}</span><span>${nf2.format(S.strOre)} h · ${eur.format(S.strEur)}</span></div>`;
+      if(S.maggOre!==null)h+=`<div class="kv"><span>Ore con maggiorazione</span><span>${nf2.format(S.maggOre)} h · ${eur.format(S.maggEur)}</span></div>`;
+      h+=`<div class="muted" style="margin-top:6px">Straordinario = righe «Ore str.» del cedolino (45%, 65%); maggiorazione = righe «Ore magg.». Gli importi sono lordi.</div>`;
+    }
+    if(!month){
+      h+=`<div class="muted" style="margin-top:8px">${S.missing.length?`Basato su ${12-S.missing.length} mesi. Mancano: ${S.missing.map(m=>cap(MONTHS[m-1])).join(", ")}.`:"Tutti i 12 mesi presenti."}</div>`;
+    }
+    if(S.missingData)h+=`<div class="muted" style="margin-top:8px">Per vedere tutti i dati (ore, straordinari, ferie) ricarica i PDF: i cedolini già presenti vengono aggiornati, non duplicati.</div>`;
+    if(S.badTotals.length)h+=`<div class="muted" style="margin-top:8px">⚠︎ In ${S.badTotals.map(d=>cap(MONTHS[d.month-1])).join(", ")} lordo − trattenute ≠ netto: controlla il cedolino.</div>`;
     r.innerHTML=h;
   }
+  renderFerie(S);renderChart(year,month);
   $("count").textContent=data.length;
   const sorted=[...data].map((d,i)=>({d,i})).sort((a,b)=>b.d.year-a.d.year||b.d.month-a.d.month);
-  $("list").innerHTML=sorted.map(({d,i})=>`<div class="item"><span>${cap(MONTHS[d.month-1])} ${d.year}<br><span class="muted">netto ${eur.format(d.netto)}</span></span><button data-del="${i}">Elimina</button></div>`).join("")||'<div class="muted">Ancora nessun cedolino.</div>';
+  const lh=sorted.map(({d,i})=>`<div class="item"><span>${cap(MONTHS[d.month-1])} ${d.year}<br><span class="muted">netto ${eur.format(d.netto)}${d.ore?" · "+nf2.format(d.ore)+" h":""}</span></span><button data-del="${i}">Elimina</button></div>`).join("")||'<div class="muted">Ancora nessun cedolino.</div>';
+  if(lh!==_lastList){$("list").innerHTML=lh;_lastList=lh}
 }
 
+$("div").value=divisor;
+$("div").addEventListener("change",()=>{
+  const v=parseFloat(String($("div").value).replace(",","."));
+  if(v>=100&&v<=250){divisor=v;try{localStorage.setItem(DKEY,String(v))}catch(e){}}
+  else $("div").value=divisor;
+  render();
+});
 $("q").addEventListener("input",()=>{
   const p=parseQuery($("q").value);
+  if(p.month===null&&p.year===null)return; // niente di riconosciuto: lascia i selettori come sono
   if(p.year&&years().includes(p.year))$("year").value=p.year;
   $("month").value=p.month||0;render();
 });
 $("month").addEventListener("change",render);
 $("year").addEventListener("change",render);
+$("chart").addEventListener("click",e=>{
+  const g=e.target.closest&&e.target.closest("[data-m]");if(!g)return;
+  const m=+g.dataset.m;$("month").value=String(+$("month").value===m?0:m);render();
+});
 $("list").addEventListener("click",e=>{
   const i=e.target.dataset&&e.target.dataset.del;
   if(i!==undefined&&confirm("Eliminare questo cedolino?")){data.splice(+i,1);save();render()}
 });
 
 $("file").addEventListener("change",async e=>{
-  const files=[...e.target.files];let added=0,skipped=0;const errs=[];
+  const files=[...e.target.files];let added=0,updated=0,skipped=0,replaced=0;const errs=[],warn=[];
   $("msg").textContent="Lettura in corso…";
   for(const f of files){
     try{
       const p=await parsePdf(f);
-      if(data.some(d=>d.month===p.month&&d.year===p.year&&d.lordo===p.lordo&&d.netto===p.netto)){skipped++;continue}
-      data.push(p);added++;
+      const ex=data.find(d=>(p.docId&&d.docId===p.docId)||(d.month===p.month&&d.year===p.year&&d.lordo===p.lordo&&d.netto===p.netto));
+      if(ex){
+        let ch=false;
+        for(const k of ENRICH)if((ex[k]===undefined||ex[k]===null)&&p[k]!==undefined&&p[k]!==null){ex[k]=p[k];ch=true}
+        ch?updated++:skipped++;continue;
+      }
+      if(!p.quadra)warn.push(f.name);
+      const same=data.findIndex(d=>d.month===p.month&&d.year===p.year);
+      if(same>=0){
+        const o=data[same];
+        if(confirm(`Hai già un cedolino di ${cap(MONTHS[p.month-1])} ${p.year} (netto ${eur.format(o.netto)}). Questo ha netto ${eur.format(p.netto)}.\n\nOK = sostituisci il vecchio\nAnnulla = aggiungi come cedolino separato (es. mensilità extra)`)){data[same]=p;replaced++}
+        else{data.push(p);added++}
+      }else{data.push(p);added++}
     }catch(err){errs.push(f.name+": "+err.message)}
   }
   save();e.target.value="";
-  $("msg").textContent=`Aggiunti: ${added}. Già presenti: ${skipped}.`+(errs.length?"\nErrori:\n"+errs.join("\n"):"");
-  if(added){const last=data[data.length-1];fillSelects();$("year").value=last.year;$("month").value=last.month}
+  $("msg").textContent=`Aggiunti: ${added}. Aggiornati: ${updated}. Sostituiti: ${replaced}. Già presenti: ${skipped}.`
+    +(warn.length?"\n⚠︎ Totali non coerenti in: "+warn.join(", "):"")
+    +(errs.length?"\nErrori:\n"+errs.join("\n"):"");
+  if(added||replaced){const last=data[data.length-1];fillSelects();$("year").value=last.year;$("month").value=last.month}
   render();
 });
 
+// ---------- backup ----------
+function backupName(){return "cedolini-backup-"+new Date().toISOString().slice(0,10)+".json"}
 $("exp").addEventListener("click",async()=>{
-  const txt=JSON.stringify(data);
-  try{if(navigator.share){await navigator.share({title:"Backup cedolini",text:txt});return}}catch(e){}
-  try{await navigator.clipboard.writeText(txt);alert("Backup copiato negli appunti. Incollalo in una nota per conservarlo.")}
-  catch(e){prompt("Copia questo testo come backup:",txt)}
-});
-$("imp").addEventListener("click",()=>{
-  const t=prompt("Incolla qui il backup:");if(!t)return;
+  const json=JSON.stringify({app:"cedolini",version:4,esportato:new Date().toISOString(),cedolini:data},null,1);
+  const name=backupName();
+  // 1) foglio di condivisione con il file (iPhone: "Salva su File")
   try{
-    const arr=JSON.parse(t);if(!Array.isArray(arr))throw 0;
-    let n=0;
-    for(const p of arr){
-      if(!p||!p.month||!p.year||typeof p.lordo!=="number"||typeof p.netto!=="number")continue;
-      if(!data.some(d=>d.month===p.month&&d.year===p.year&&d.lordo===p.lordo&&d.netto===p.netto)){data.push(p);n++}
-    }
-    save();render();alert("Ripristinati "+n+" cedolini.");
-  }catch(e){alert("Backup non valido.")}
+    const file=new File([json],name,{type:"application/json"});
+    if(navigator.canShare&&navigator.canShare({files:[file]})){await navigator.share({files:[file],title:"Backup cedolini"});return}
+  }catch(e){if(e&&e.name==="AbortError")return}
+  // 2) download del file
+  try{
+    const url=URL.createObjectURL(new Blob([json],{type:"application/json"}));
+    const a=document.createElement("a");a.href=url;a.download=name;document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    $("msg").textContent="Backup salvato: "+name+" (controlla i Download o l'app File).";
+    return;
+  }catch(e){}
+  // 3) ultima risorsa: testo da copiare
+  try{await navigator.clipboard.writeText(json);alert("Backup copiato negli appunti. Incollalo in una nota per conservarlo.")}
+  catch(e){prompt("Copia questo testo come backup:",json)}
 });
+function importBackup(text){
+  let j;try{j=JSON.parse(text)}catch(e){alert("Backup non valido.");return}
+  const arr=Array.isArray(j)?j:(j&&Array.isArray(j.cedolini)?j.cedolini:null); // accetta anche i vecchi backup (solo elenco)
+  if(!arr){alert("Backup non valido.");return}
+  let n=0,u=0;
+  for(const raw of arr){
+    const p=clean(raw);if(!p)continue;
+    const ex=data.find(d=>(p.docId&&d.docId===p.docId)||(d.month===p.month&&d.year===p.year&&d.lordo===p.lordo&&d.netto===p.netto));
+    if(ex){for(const k of ENRICH)if((ex[k]===undefined||ex[k]===null)&&p[k]!==undefined&&p[k]!==null){ex[k]=p[k];u++}}
+    else{data.push(p);n++}
+  }
+  save();render();alert("Ripristinati "+n+" cedolini"+(u?" (e completati "+u+" dati mancanti)":"")+".");
+}
+$("imp").addEventListener("click",()=>$("impfile").click());
+$("impfile").addEventListener("change",async e=>{
+  const f=e.target.files[0];e.target.value="";if(!f)return;
+  try{importBackup(await f.text())}catch(err){alert("Impossibile leggere il file.")}
+});
+$("impt").addEventListener("click",()=>{const t=prompt("Incolla qui il backup:");if(t)importBackup(t)});
 
 render();
 if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch(()=>{});
